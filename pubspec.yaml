@@ -1,0 +1,32 @@
+name: id_photo_maker
+description: "证件照制作 App —— 按标准规格裁剪、智能换底色、按目标体积压缩，支持排版打印。"
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.10.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # 选图 / 拍照
+  image_picker: ^1.2.3
+  # 纯 Dart 图像编解码（JPEG 质量控制、PNG 编码）
+  image: ^4.5.4
+  # 临时文件目录
+  path_provider: ^2.1.5
+  # 保存到系统相册
+  gal: ^2.3.3
+  # 系统分享面板
+  share_plus: ^13.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true

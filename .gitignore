@@ -1,0 +1,33 @@
+# ---------------- Dart / Flutter ----------------
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+build/
+
+# ---------------- Android ----------------
+# android/ 下的 gradlew / gradle-wrapper.jar / local.properties 由 android/.gitignore 单独处理
+android/.gradle/
+android/key.properties
+android/app/debug/
+android/app/profile/
+android/app/release/
+*.jks
+*.keystore
+.cxx/
+
+# ---------------- IDE ----------------
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*.orig
+
+# ---------------- 系统 ----------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------------- WorkBuddy 运行态数据（非应用代码） ----------------
+.workbuddy/
