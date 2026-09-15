@@ -13,6 +13,8 @@ on:
 jobs:
   build-apk:
     runs-on: ubuntu-latest
+    # 兜底：任何一步卡住都不会一直挂到 GitHub 默认的 6 小时上限
+    timeout-minutes: 40
 
     steps:
       - name: 检出代码
@@ -49,6 +51,7 @@ jobs:
 
       - name: 单元测试
         continue-on-error: true
+        timeout-minutes: 10
         run: flutter test --reporter expanded
 
       - name: 构建通用 release APK
