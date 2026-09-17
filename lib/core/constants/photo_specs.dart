@@ -34,7 +34,44 @@ class PhotoSpec {
   /// 该规格最常见的底色。
   final String defaultSwatchId;
 
-  double get aspectRatio => widthMm / heightMm;
+  /// 运行时构造「自定义」规格：**直接以像素为单位输入**。
+  ///
+  /// 不把自定义规格塞进 [PhotoSpecs.all] 常量表，是因为它的值随用户输入变化，
+  /// 放进常量表会让 `byId` / `byCategory` 的结果不稳定。这里只构造实例，
+  /// 由调用方（裁剪会话 / 页面）持有。
+  factory PhotoSpec.custom({
+    required int widthPx,
+    required int heightPx,
+    int dpi = 300,
+  }) {
+    final int w = widthPx.clamp(16, 20000);
+    final int h = heightPx.clamp(16, 20000);
+    return PhotoSpec(
+      id: PhotoSpecs.customId,
+      name: '自定义',
+      widthMm: w / dpi * 25.4,
+      heightMm: h / dpi * 25.4,
+      category: '其他',
+      dpi: dpi,
+      pxWidthOverride: w,
+      pxHeightOverride: h,
+      defaultSwatchId: 'white',
+    );
+  }
+
+  /// 是否是「自定义」规格。
+  bool get isCustom => id == PhotoSpecs.customId;
+
+  /// 宽高比。
+  ///
+  /// **优先使用像素覆盖值**：自定义规格是直接输入像素的，毫米值只是由像素
+  /// 反算出来的近似值，拿它算比例会引入舍入误差，导致裁剪框和输出尺寸对不上。
+  double get aspectRatio {
+    final int? pw = pxWidthOverride;
+    final int? ph = pxHeightOverride;
+    if (pw != null && ph != null && ph > 0) return pw / ph;
+    return widthMm / heightMm;
+  }
 
   int pixelWidth(int dpi) =>
       pxWidthOverride ?? (widthMm / 25.4 * dpi).round();
@@ -43,9 +80,17 @@ class PhotoSpec {
       pxHeightOverride ?? (heightMm / 25.4 * dpi).round();
 
   /// 例如 `25×35mm`。
+  ///
+  /// 先四舍五入到 1 位小数再去掉多余的 `.0` —— 否则自定义规格由像素反算出的
+  /// `34.97mm` 会显示成 `35.0mm` 这种别扭的形式。
   String get mmLabel {
-    String fmt(double v) =>
-        v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+    String fmt(double v) {
+      final double r = (v * 10).round() / 10;
+      return r == r.roundToDouble()
+          ? r.toStringAsFixed(0)
+          : r.toStringAsFixed(1);
+    }
+
     return '${fmt(widthMm)}×${fmt(heightMm)}mm';
   }
 
@@ -69,6 +114,9 @@ class PhotoSpecs {
   static const String categoryId = '证件';
   static const String categoryVisa = '签证';
   static const String categoryExam = '考试';
+
+  /// 「自定义」规格的固定 id。选中它时由 [PhotoSpec.custom] 现场构造实例。
+  static const String customId = 'custom';
 
   static const List<PhotoSpec> all = <PhotoSpec>[
     // ---------------- 常用 ----------------
@@ -313,12 +361,12 @@ class PhotoSpecs {
       defaultSwatchId: 'blue',
     ),
     PhotoSpec(
-      id: 'custom',
+      id: customId,
       name: '自定义',
       widthMm: 35,
       heightMm: 45,
       category: '其他',
-      note: '尺寸自由调整',
+      note: '手动输入像素尺寸',
       defaultSwatchId: 'white',
     ),
   ];

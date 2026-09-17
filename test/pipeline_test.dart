@@ -88,6 +88,33 @@ void main() {
         );
       }
     });
+
+    test('自定义规格直接以像素为准，不被毫米舍入污染', () {
+      final PhotoSpec custom =
+          PhotoSpec.custom(widthPx: 300, heightPx: 400, dpi: 300);
+      expect(custom.isCustom, isTrue);
+      expect(custom.id, PhotoSpecs.customId);
+      // 像素值是原样保留的，不会因为走了毫米换算而变成 299 或 401
+      expect(custom.pixelWidth(300), 300);
+      expect(custom.pixelHeight(300), 400);
+      // 宽高比优先取像素，而不是由反算出的毫米值再除一遍
+      expect(custom.aspectRatio, closeTo(300 / 400, 1e-9));
+      // 换一个 dpi 也不该改变像素尺寸
+      expect(custom.pixelWidth(600), 300);
+      expect(custom.pixelHeight(600), 400);
+    });
+
+    test('自定义规格会夹紧到合法范围', () {
+      final PhotoSpec tooSmall = PhotoSpec.custom(widthPx: 1, heightPx: 0);
+      expect(tooSmall.pixelWidth(300), 16);
+      expect(tooSmall.pixelHeight(300), 16);
+    });
+
+    test('自定义规格的毫米标签是干净的一位小数', () {
+      // 300px @300DPI = 25.4mm，不该显示成 25.40mm
+      final PhotoSpec custom = PhotoSpec.custom(widthPx: 300, heightPx: 413);
+      expect(custom.mmLabel, '25.4×35mm');
+    });
   });
 
   group('SegmentationService', () {
@@ -377,6 +404,56 @@ void main() {
       final SheetLayout layout =
           LayoutService.buildSheet(photo, copies: 16, paper: PaperSize.fiveInch);
       expect(layout.copies, layout.cols * layout.rows);
+    });
+
+    test('混排：4 张不同长宽比照片都排得下且保持各自比例', () {
+      final List<PixelBuffer> photos = <PixelBuffer>[
+        fakePortrait(295, 413),
+        fakePortrait(600, 200),
+        fakePortrait(200, 600),
+        fakePortrait(300, 300),
+      ];
+      final SheetLayout layout = LayoutService.buildMixedSheet(photos);
+
+      expect(layout.copies, 4);
+      expect(layout.cols * layout.rows, greaterThanOrEqualTo(4));
+      expect(layout.photoWidths.length, 4);
+      expect(layout.sheet.width, PaperSize.sixInch.widthPx(300));
+      expect(layout.sheet.height, PaperSize.sixInch.heightPx(300));
+
+      for (int i = 0; i < photos.length; i++) {
+        final double src = photos[i].width / photos[i].height;
+        final double dst = layout.photoWidths[i] / layout.photoHeights[i];
+        expect(dst, closeTo(src, 0.05), reason: '第 ${i + 1} 张被拉伸了');
+      }
+    });
+
+    test('混排：关掉裁切线时相纸四角仍是白纸', () {
+      final List<PixelBuffer> photos = <PixelBuffer>[
+        fakePortrait(295, 413),
+        fakePortrait(600, 200),
+      ];
+      final SheetLayout layout =
+          LayoutService.buildMixedSheet(photos, cutLines: false);
+      expect(layout.sheet.argbAt(0, 0), 0xFFFFFFFF);
+      expect(
+        layout.sheet.argbAt(layout.sheet.width - 1, layout.sheet.height - 1),
+        0xFFFFFFFF,
+      );
+    });
+
+    test('混排：空列表不崩溃', () {
+      final SheetLayout layout =
+          LayoutService.buildMixedSheet(<PixelBuffer>[]);
+      expect(layout.copies, 0);
+      expect(layout.sheet.width, PaperSize.sixInch.widthPx(300));
+    });
+
+    test('混排：8 张同尺寸照片与单张重复得到同一个网格', () {
+      final PixelBuffer photo = fakePortrait(295, 413);
+      final SheetLayout mixed =
+          LayoutService.buildMixedSheet(List<PixelBuffer>.filled(8, photo));
+      expect('${mixed.cols}x${mixed.rows}', '4x2');
     });
   });
 }

@@ -420,6 +420,60 @@ Future<void> main(List<String> args) async {
   check('A4 排 12 张', sheetA4.cols * sheetA4.rows >= 12,
       '${sheetA4.cols}x${sheetA4.rows}');
 
+  // ---------------------------------------------------------------- 多张混排
+  section('多张不同照片拼一张');
+  final PixelBuffer wide = ImageOps.resampleRegion(portrait, 0, 0, 400, 560, 600, 200);
+  final PixelBuffer tall = ImageOps.resampleRegion(portrait, 0, 0, 400, 560, 200, 600);
+  final List<PixelBuffer> mixed = <PixelBuffer>[photo, wide, tall, base];
+
+  final SheetLayout mixed4 = LayoutService.buildMixedSheet(mixed);
+  check(
+    '4 张不同长宽比都排得下',
+    mixed4.cols * mixed4.rows >= 4 && mixed4.copies == 4,
+    '${mixed4.cols}x${mixed4.rows}',
+  );
+  checkEq('相纸尺寸与 6 寸一致', '${mixed4.sheet.width}x${mixed4.sheet.height}',
+      '1795x1205');
+  checkEq('每张都记下落纸尺寸', mixed4.photoWidths.length, 4);
+  check(
+    '每张都保持自身长宽比（不裁不拉）',
+    <int>[0, 1, 2, 3].every((int i) {
+      final double src = mixed[i].width / mixed[i].height;
+      final double dst = mixed4.photoWidths[i] / mixed4.photoHeights[i];
+      return (src - dst).abs() < 0.05;
+    }),
+    '落纸尺寸 ${mixed4.photoWidths.join(',')}',
+  );
+  check(
+    '每张都没超出格子',
+    <int>[0, 1, 2, 3].every(
+      (int i) =>
+          mixed4.photoWidths[i] <= mixed4.sheet.width &&
+          mixed4.photoHeights[i] <= mixed4.sheet.height,
+    ),
+  );
+  writePng(mixed4.sheet, '$outDir/08_sheet_mixed_4.png');
+
+  final SheetLayout mixedPlain =
+      LayoutService.buildMixedSheet(mixed, cutLines: false);
+  check(
+    '关掉裁切线后相纸四角仍是白纸',
+    mixedPlain.sheet.argbAt(0, 0) == 0xFFFFFFFF &&
+        mixedPlain.sheet.argbAt(
+              mixedPlain.sheet.width - 1,
+              mixedPlain.sheet.height - 1,
+            ) ==
+            0xFFFFFFFF,
+  );
+
+  final SheetLayout mixed8 =
+      LayoutService.buildMixedSheet(List<PixelBuffer>.filled(8, photo));
+  checkEq('8 张同尺寸照片混排也落在 4x2', '${mixed8.cols}x${mixed8.rows}', '4x2');
+
+  final SheetLayout mixedEmpty =
+      LayoutService.buildMixedSheet(<PixelBuffer>[]);
+  checkEq('空列表不崩溃', mixedEmpty.copies, 0);
+
   // ---------------------------------------------------------------- 汇总
   stdout.writeln('');
   stdout.writeln('========================================');

@@ -4,33 +4,42 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
-import '../../core/constants/bg_swatches.dart';
-import '../../core/theme/app_theme.dart';
-import '../../core/utils/pixel_buffer.dart';
-import '../../models/edit_session.dart';
-import '../../services/recolor_service.dart';
-import '../../services/segmentation_service.dart';
-import '../widgets/common.dart';
-import '../widgets/pixel_buffer_view.dart';
-import 'export_page.dart';
+import '../../../core/constants/bg_swatches.dart';
+import '../../../core/theme/app_theme.dart';
+import '../../../core/utils/pixel_buffer.dart';
+import '../../../models/crop_session.dart';
+import '../../../models/output_options.dart';
+import '../../../models/recolor_state.dart';
+import '../../../services/recolor_service.dart';
+import '../../../services/segmentation_service.dart';
+import '../../widgets/common.dart';
+import '../../widgets/pixel_buffer_view.dart';
+import 'crop_editor_page.dart';
+import 'output_page.dart';
 
-enum _Tool { none, pipette, brushBackground, brushForeground }
+enum _Brush { none, pipette, background, foreground }
 
-class BackgroundPage extends StatefulWidget {
-  const BackgroundPage({super.key, required this.session});
+/// 换底色编辑器。
+///
+/// 「裁剪」在这里是**可选**的：默认直接拿原图换底，用户想去掉多余部分时
+/// 再点上面的「裁剪」进 [CropEditorPage]。这样只想去蓝底的人不会被强塞
+/// 一次裁剪流程。
+class RecolorEditorPage extends StatefulWidget {
+  const RecolorEditorPage({super.key, required this.session});
 
-  final EditSession session;
+  final CropSession session;
 
   @override
-  State<BackgroundPage> createState() => _BackgroundPageState();
+  State<RecolorEditorPage> createState() => _RecolorEditorPageState();
 }
 
-class _BackgroundPageState extends State<BackgroundPage> {
-  late final EditSession s = widget.session;
+class _RecolorEditorPageState extends State<RecolorEditorPage> {
+  late final CropSession s = widget.session;
+  late final RecolorState r = RecolorState(swatchId: s.spec.defaultSwatchId);
 
   bool _busy = false;
   bool _showOriginal = false;
-  _Tool _tool = _Tool.none;
+  _Brush _brush = _Brush.none;
   double _brushRadius = 12;
   Offset? _lastBrushPoint;
 
@@ -51,34 +60,34 @@ class _BackgroundPageState extends State<BackgroundPage> {
 
   // ------------------------------------------------ 计算
 
-  /// 重新计算掩膜（抠图）。
+  PixelBuffer _base() => s.baseImage;
+
   Future<void> _recompute() async {
     if (!mounted) return;
     setState(() => _busy = true);
-    final PixelBuffer base = s.renderCrop();
+    final PixelBuffer base = _base();
     final MaskResult result =
-        await SegmentationService.buildMask(base, s.segmentOptions);
+        await SegmentationService.buildMask(base, r.options);
     if (!mounted) return;
-    s.mask = result;
+    r.mask = result;
     _composite();
     setState(() => _busy = false);
   }
 
   /// 只换底色，不重算掩膜。
   void _composite() {
-    final MaskResult? mask = s.mask;
+    final MaskResult? mask = r.mask;
     if (mask == null) return;
-    s.composited = RecolorService.apply(
-      source: s.renderCrop(),
+    r.composited = RecolorService.apply(
+      source: _base(),
       mask: mask.mask,
-      swatch: s.swatch,
+      swatch: r.swatch,
       originalBackgroundArgb: mask.backgroundArgb,
     );
-    s.invalidateEncoded();
   }
 
   void _onToleranceChanged(double value) {
-    s.tolerance = value.round();
+    r.tolerance = value.round();
     setState(() {});
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 140), _recompute);
@@ -86,33 +95,37 @@ class _BackgroundPageState extends State<BackgroundPage> {
 
   void _onSwatchChanged(BgSwatch swatch) {
     setState(() {
-      s.swatch = swatch;
+      r.swatch = swatch;
       _composite();
     });
   }
 
   void _onEdgeChanged({int? clean, int? feather}) {
     setState(() {
-      if (clean != null) s.edgeClean = clean;
-      if (feather != null) s.feather = feather;
+      if (clean != null) r.edgeClean = clean;
+      if (feather != null) r.feather = feather;
     });
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 140), _recompute);
   }
 
   void _resetMask() {
-    s.seedColor = null;
-    s.tolerance = 34;
-    s.edgeClean = 1;
-    s.feather = 1;
-    s.invalidateMask();
+    r.reset();
     _recompute();
+  }
+
+  // ------------------------------------------------ 裁剪
+
+  /// 裁剪状态变了（启用 / 调整 / 恢复原图），掩膜必须重算。
+  Future<void> _onCropChanged() async {
+    r.invalidateMask();
+    await _recompute();
   }
 
   // ------------------------------------------------ 交互
 
   Offset? _toImagePoint(Size box, Offset local) {
-    final PixelBuffer img = s.baseImage;
+    final PixelBuffer img = _base();
     final Rect rect = containRect(
       box,
       Size(img.width.toDouble(), img.height.toDouble()),
@@ -128,22 +141,22 @@ class _BackgroundPageState extends State<BackgroundPage> {
   void _pickBackgroundColor(Size box, Offset local) {
     final Offset? p = _toImagePoint(box, local);
     if (p == null) return;
-    final PixelBuffer img = s.baseImage;
-    final int argb = img.argbAt(p.dx.round(), p.dy.round());
-    s.seedColor = argb & 0xFFFFFF;
+    final int argb = _base().argbAt(p.dx.round(), p.dy.round());
+    r.seedColor = argb & 0xFFFFFF;
     _toast(
-      '已取色 #${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}，正在重新识别',
+      '已取色 #${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}，'
+      '正在重新识别',
     );
     _recompute();
   }
 
   void _applyBrush(Size box, Offset local, bool isStart) {
-    final MaskResult? mask = s.mask;
+    final MaskResult? mask = r.mask;
     if (mask == null) return;
     final Offset? p = _toImagePoint(box, local);
     if (p == null) return;
 
-    final bool asBackground = _tool == _Tool.brushBackground;
+    final bool asBackground = _brush == _Brush.background;
     final int radius = _brushRadius.round().clamp(2, 120);
     final Offset? prev = _lastBrushPoint;
 
@@ -172,22 +185,13 @@ class _BackgroundPageState extends State<BackgroundPage> {
     }
     _lastBrushPoint = p;
 
-    // 逐帧重算合成会掉帧，这里限制在 ~25fps
+    // 逐帧重算合成会掉帧，限制在 ~25fps
     final DateTime now = DateTime.now();
     if (now.difference(_lastComposite).inMilliseconds >= 40) {
       _lastComposite = now;
       _composite();
-      setState(() {});
-    } else {
-      setState(() {});
     }
-  }
-
-  void _next() {
-    if (s.mask != null) _composite();
-    Navigator.of(context).push<void>(
-      MaterialPageRoute<void>(builder: (_) => ExportPage(session: s)),
-    );
+    setState(() {});
   }
 
   void _toast(String message) {
@@ -195,6 +199,24 @@ class _BackgroundPageState extends State<BackgroundPage> {
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _finish() {
+    if (r.mask != null) _composite();
+    final PixelBuffer output = r.outputOn(_base());
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => OutputPage(
+          image: output,
+          baseName: outputBaseName(s.sourceName, r.swatch.name),
+          title: '导出换底结果',
+          transparent: r.transparentOutput,
+          dpi: s.dpi,
+          metaLabel: s.summaryLabel,
+          shareText: '证件照（${r.swatch.name}底）已制作完成',
+        ),
+      ),
+    );
   }
 
   // ------------------------------------------------ 视图
@@ -221,8 +243,8 @@ class _BackgroundPageState extends State<BackgroundPage> {
   }
 
   Widget _buildStage() {
-    final PixelBuffer preview =
-        _showOriginal ? s.baseImage : s.previewImage;
+    final PixelBuffer base = _base();
+    final PixelBuffer preview = _showOriginal ? base : r.previewOn(base);
 
     return ColoredBox(
       color: AppColors.stage,
@@ -230,11 +252,11 @@ class _BackgroundPageState extends State<BackgroundPage> {
         builder: (BuildContext context, BoxConstraints c) {
           final Size box = Size(c.maxWidth, c.maxHeight);
           final bool brushing =
-              _tool == _Tool.brushBackground || _tool == _Tool.brushForeground;
+              _brush == _Brush.background || _brush == _Brush.foreground;
 
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapUp: _tool == _Tool.pipette
+            onTapUp: _brush == _Brush.pipette
                 ? (TapUpDetails d) => _pickBackgroundColor(box, d.localPosition)
                 : null,
             onLongPressStart: (LongPressStartDetails _) =>
@@ -248,7 +270,8 @@ class _BackgroundPageState extends State<BackgroundPage> {
                   }
                 : null,
             onPanUpdate: brushing
-                ? (DragUpdateDetails d) => _applyBrush(box, d.localPosition, false)
+                ? (DragUpdateDetails d) =>
+                    _applyBrush(box, d.localPosition, false)
                 : null,
             onPanEnd: brushing
                 ? (DragEndDetails _) {
@@ -262,7 +285,7 @@ class _BackgroundPageState extends State<BackgroundPage> {
                 Positioned.fill(
                   child: Padding(
                     padding: const EdgeInsets.all(22),
-                    child: (s.bgEnabled && s.swatch.transparent)
+                    child: (r.enabled && r.swatch.transparent)
                         ? Checkerboard(
                             cell: 12,
                             child: PixelBufferView(buffer: preview),
@@ -270,16 +293,16 @@ class _BackgroundPageState extends State<BackgroundPage> {
                         : PixelBufferView(buffer: preview),
                   ),
                 ),
-                if (brushing && s.mask != null)
+                if (brushing && r.mask != null)
                   Positioned.fill(
                     child: Padding(
                       padding: const EdgeInsets.all(22),
                       child: CustomPaint(
                         painter: _MaskOverlayPainter(
-                          mask: s.mask!.mask,
-                          imageWidth: s.mask!.width,
-                          imageHeight: s.mask!.height,
-                          asBackground: _tool == _Tool.brushBackground,
+                          mask: r.mask!.mask,
+                          imageWidth: r.mask!.width,
+                          imageHeight: r.mask!.height,
+                          asBackground: _brush == _Brush.background,
                         ),
                       ),
                     ),
@@ -297,29 +320,7 @@ class _BackgroundPageState extends State<BackgroundPage> {
                       ),
                     ),
                   ),
-                Positioned(
-                  left: 0,
-                  right: 0,
-                  top: 10,
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.45),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: Text(
-                        _hintText(),
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          color: Colors.white,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
+                _buildHint(),
               ],
             ),
           );
@@ -328,16 +329,38 @@ class _BackgroundPageState extends State<BackgroundPage> {
     );
   }
 
-  String _hintText() => switch (_tool) {
-        _Tool.pipette => '点击照片上的背景区域取色',
-        _Tool.brushBackground => '涂抹要变成背景的区域（红色覆盖处）',
-        _Tool.brushForeground => '涂抹要保留的人物区域（绿色覆盖处）',
-        _Tool.none => '长按照片可对比原图',
-      };
+  Widget _buildHint() {
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 10,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Text(
+            switch (_brush) {
+              _Brush.pipette => '点击照片上的背景区域取色',
+              _Brush.background => '涂抹要变成背景的区域（红色覆盖处）',
+              _Brush.foreground => '涂抹要保留的人物区域（绿色覆盖处）',
+              _Brush.none => '长按照片可对比原图',
+            },
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: Colors.white,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 
   Widget _buildPanel() {
-    final MaskResult? mask = s.mask;
-    final double maxPanelHeight = MediaQuery.of(context).size.height * 0.52;
+    final double maxPanelHeight = MediaQuery.of(context).size.height * 0.54;
 
     return Container(
       constraints: BoxConstraints(maxHeight: maxPanelHeight),
@@ -346,7 +369,10 @@ class _BackgroundPageState extends State<BackgroundPage> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
         boxShadow: <BoxShadow>[
           BoxShadow(
-              color: Color(0x14000000), blurRadius: 18, offset: Offset(0, -4)),
+            color: Color(0x14000000),
+            blurRadius: 18,
+            offset: Offset(0, -4),
+          ),
         ],
       ),
       child: SafeArea(
@@ -356,6 +382,8 @@ class _BackgroundPageState extends State<BackgroundPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
+              CropHintCard(session: s, onChanged: _onCropChanged),
+              const SizedBox(height: 16),
               Row(
                 children: <Widget>[
                   const Expanded(
@@ -369,59 +397,41 @@ class _BackgroundPageState extends State<BackgroundPage> {
                     ),
                   ),
                   Text(
-                    s.bgEnabled ? '已开启' : '已关闭',
+                    r.enabled ? '已开启' : '已关闭',
                     style: TextStyle(
                       fontSize: 12.5,
-                      color: s.bgEnabled
-                          ? AppColors.brand
-                          : AppColors.textTertiary,
+                      color:
+                          r.enabled ? AppColors.brand : AppColors.textTertiary,
                     ),
                   ),
                   Switch(
-                    value: s.bgEnabled,
-                    onChanged: (bool v) {
-                      setState(() {
-                        s.bgEnabled = v;
-                        s.invalidateEncoded();
-                      });
-                    },
+                    value: r.enabled,
+                    onChanged: (bool v) => setState(() => r.enabled = v),
                   ),
                 ],
               ),
-              const SizedBox(height: 2),
-              _StatusBar(
-                mask: mask,
-                swatch: s.swatch,
-                enabled: s.bgEnabled,
-              ),
+              _StatusBar(mask: r.mask, swatch: r.swatch, enabled: r.enabled),
               const SizedBox(height: 12),
-              const Text(
-                '选择底色',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
-                ),
-              ),
+              const _SectionLabel('选择底色'),
               const SizedBox(height: 10),
-              SwatchPicker(selected: s.swatch, onSelected: _onSwatchChanged),
+              SwatchPicker(selected: r.swatch, onSelected: _onSwatchChanged),
               const SizedBox(height: 4),
               LabelSlider(
                 label: '抠图容差',
-                value: s.tolerance.toDouble(),
+                value: r.tolerance.toDouble(),
                 min: 0,
                 max: 80,
                 onChanged: _onToleranceChanged,
-                valueLabel: '${s.tolerance}',
+                valueLabel: '${r.tolerance}',
                 hint: '背景没抠干净就调大；人物被误当背景吃掉就调小',
               ),
               const SizedBox(height: 8),
               Row(
                 children: <Widget>[
                   Expanded(
-                    child: _Stepper(
+                    child: StepperBox(
                       label: '去边缘杂色',
-                      value: s.edgeClean,
+                      value: r.edgeClean,
                       min: 0,
                       max: 4,
                       unit: 'px',
@@ -430,9 +440,9 @@ class _BackgroundPageState extends State<BackgroundPage> {
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: _Stepper(
+                    child: StepperBox(
                       label: '边缘羽化',
-                      value: s.feather,
+                      value: r.feather,
                       min: 0,
                       max: 6,
                       unit: 'px',
@@ -442,44 +452,39 @@ class _BackgroundPageState extends State<BackgroundPage> {
                 ],
               ),
               const SizedBox(height: 14),
-              const Text(
-                '手动修补',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: AppColors.textPrimary,
-                ),
-              ),
+              const _SectionLabel('手动修补'),
               const SizedBox(height: 8),
               Row(
                 children: <Widget>[
-                  _ToolButton(
+                  ToolButton(
                     icon: Icons.colorize_rounded,
                     label: '取色',
-                    active: _tool == _Tool.pipette,
-                    onTap: () => setState(() => _tool =
-                        _tool == _Tool.pipette ? _Tool.none : _Tool.pipette),
+                    active: _brush == _Brush.pipette,
+                    onTap: () => setState(() => _brush =
+                        _brush == _Brush.pipette ? _Brush.none : _Brush.pipette),
                   ),
-                  _ToolButton(
+                  ToolButton(
                     icon: Icons.brush_rounded,
                     label: '涂背景',
-                    active: _tool == _Tool.brushBackground,
-                    onTap: () => setState(() => _tool = _tool == _Tool.brushBackground
-                        ? _Tool.none
-                        : _Tool.brushBackground),
+                    active: _brush == _Brush.background,
+                    onTap: () => setState(() => _brush = _brush == _Brush.background
+                        ? _Brush.none
+                        : _Brush.background),
                   ),
-                  _ToolButton(
+                  ToolButton(
                     icon: Icons.auto_fix_normal_rounded,
                     label: '抹前景',
-                    active: _tool == _Tool.brushForeground,
-                    onTap: () => setState(() => _tool =
-                        _tool == _Tool.brushForeground ? _Tool.none : _Tool.brushForeground),
+                    active: _brush == _Brush.foreground,
+                    onTap: () => setState(() => _brush = _brush == _Brush.foreground
+                        ? _Brush.none
+                        : _Brush.foreground),
                   ),
-                  _ToolButton(
+                  ToolButton(
                     icon: Icons.visibility_rounded,
                     label: '看原图',
                     active: _showOriginal,
-                    onTap: () => setState(() => _showOriginal = !_showOriginal),
+                    onTap: () =>
+                        setState(() => _showOriginal = !_showOriginal),
                   ),
                 ],
               ),
@@ -492,10 +497,10 @@ class _BackgroundPageState extends State<BackgroundPage> {
                 onChanged: (double v) => setState(() => _brushRadius = v),
                 valueLabel: '${_brushRadius.round()}px',
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 12),
               FilledButton(
-                onPressed: _next,
-                child: const Text('下一步 · 压缩导出'),
+                onPressed: _finish,
+                child: const Text('下一步 · 导出'),
               ),
             ],
           ),
@@ -503,9 +508,28 @@ class _BackgroundPageState extends State<BackgroundPage> {
       ),
     );
   }
+
 }
 
 // ------------------------------------------------ 子组件
+
+class _SectionLabel extends StatelessWidget {
+  const _SectionLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w600,
+        color: AppColors.textPrimary,
+      ),
+    );
+  }
+}
 
 class _StatusBar extends StatelessWidget {
   const _StatusBar({
@@ -523,7 +547,11 @@ class _StatusBar extends StatelessWidget {
     if (!enabled) {
       return const Row(
         children: <Widget>[
-          Icon(Icons.info_outline_rounded, size: 15, color: AppColors.textTertiary),
+          Icon(
+            Icons.info_outline_rounded,
+            size: 15,
+            color: AppColors.textTertiary,
+          ),
           SizedBox(width: 6),
           Expanded(
             child: Text(
@@ -535,7 +563,8 @@ class _StatusBar extends StatelessWidget {
       );
     }
 
-    if (mask == null) {
+    final MaskResult? m = mask;
+    if (m == null) {
       return const Row(
         children: <Widget>[
           SizedBox(
@@ -552,13 +581,13 @@ class _StatusBar extends StatelessWidget {
       );
     }
 
-    final double coverage = mask!.coverage;
-    final bool suspicious = mask!.fallbackUsed || coverage < 0.08;
+    final double coverage = m.coverage;
+    final bool suspicious = m.fallbackUsed || coverage < 0.08;
     final Color color = suspicious ? AppColors.warning : AppColors.success;
     final String text = suspicious
         ? '没找到明显背景，请用「涂背景」手动补一下'
         : '背景识别完成 · 背景占比 ${(coverage * 100).toStringAsFixed(0)}%'
-            ' · 原底色 #${mask!.backgroundArgb.toRadixString(16).padLeft(6, '0').toUpperCase()}';
+            ' · 原底色 #${m.backgroundArgb.toRadixString(16).padLeft(6, '0').toUpperCase()}';
 
     return Row(
       children: <Widget>[
@@ -569,10 +598,7 @@ class _StatusBar extends StatelessWidget {
         ),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(
-            text,
-            style: TextStyle(fontSize: 12.5, color: color),
-          ),
+          child: Text(text, style: TextStyle(fontSize: 12.5, color: color)),
         ),
         if (swatch.transparent)
           const InfoChip(
@@ -585,156 +611,7 @@ class _StatusBar extends StatelessWidget {
   }
 }
 
-class _ToolButton extends StatelessWidget {
-  const _ToolButton({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.active = false,
-  });
-
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool active;
-
-  @override
-  Widget build(BuildContext context) {
-    final Color color = active ? AppColors.brand : AppColors.textSecondary;
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        behavior: HitTestBehavior.opaque,
-        child: Column(
-          children: <Widget>[
-            Container(
-              width: 46,
-              height: 46,
-              decoration: BoxDecoration(
-                color: active ? AppColors.brandSoft : AppColors.pageBg,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: active ? AppColors.brand : Colors.transparent,
-                ),
-              ),
-              child: Icon(icon, size: 21, color: color),
-            ),
-            const SizedBox(height: 5),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                color: color,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _Stepper extends StatelessWidget {
-  const _Stepper({
-    required this.label,
-    required this.value,
-    required this.min,
-    required this.max,
-    required this.onChanged,
-    this.unit = '',
-  });
-
-  final String label;
-  final int value;
-  final int min;
-  final int max;
-  final ValueChanged<int> onChanged;
-  final String unit;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-      decoration: BoxDecoration(
-        color: AppColors.pageBg,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: AppColors.textSecondary,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  '$value$unit',
-                  style: const TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          _MiniButton(
-            icon: Icons.remove_rounded,
-            enabled: value > min,
-            onTap: () => onChanged(math.max(min, value - 1)),
-          ),
-          _MiniButton(
-            icon: Icons.add_rounded,
-            enabled: value < max,
-            onTap: () => onChanged(math.min(max, value + 1)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _MiniButton extends StatelessWidget {
-  const _MiniButton({
-    required this.icon,
-    required this.enabled,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final bool enabled;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: Container(
-        width: 26,
-        height: 26,
-        margin: const EdgeInsets.only(left: 6),
-        decoration: BoxDecoration(
-          color: AppColors.surface,
-          borderRadius: BorderRadius.circular(7),
-        ),
-        child: Icon(
-          icon,
-          size: 16,
-          color: enabled ? AppColors.textPrimary : AppColors.textTertiary,
-        ),
-      ),
-    );
-  }
-}
-
-/// 画笔模式下把掩膜以半透明红色叠加显示。
+/// 画笔模式下把掩膜以半透明色叠加显示。
 class _MaskOverlayPainter extends CustomPainter {
   _MaskOverlayPainter({
     required this.mask,
@@ -750,10 +627,13 @@ class _MaskOverlayPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final Rect target = containRect(size, Size(imageWidth.toDouble(), imageHeight.toDouble()));
+    final Rect target = containRect(
+      size,
+      Size(imageWidth.toDouble(), imageHeight.toDouble()),
+    );
     if (target.width <= 0) return;
 
-    // 逐格采样：既保留了掩膜的形状信息，也避免绘制上万个矩形。
+    // 逐格采样：既保留掩膜形状，也避免绘制上万个矩形。
     const double cell = 3;
     final int cols = (target.width / cell).ceil();
     final int rows = (target.height / cell).ceil();
@@ -761,24 +641,30 @@ class _MaskOverlayPainter extends CustomPainter {
     final double sampleScaleY = imageHeight / target.height;
 
     final Paint paint = Paint()
-      ..color = (asBackground ? const Color(0xFFFF4D4F) : const Color(0xFF34D399))
+      ..color = (asBackground
+              ? const Color(0xFFFF4D4F)
+              : const Color(0xFF34D399))
           .withValues(alpha: 0.42);
 
     final Path path = Path();
     for (int y = 0; y < rows; y++) {
-      final int sy = (y * cell * sampleScaleY).round().clamp(0, imageHeight - 1);
+      final int sy =
+          (y * cell * sampleScaleY).round().clamp(0, math.max(0, imageHeight - 1));
       for (int x = 0; x < cols; x++) {
-        final int sx = (x * cell * sampleScaleX).round().clamp(0, imageWidth - 1);
+        final int sx =
+            (x * cell * sampleScaleX).round().clamp(0, math.max(0, imageWidth - 1));
         final int v = mask[sy * imageWidth + sx];
         // 「涂背景」时高亮背景；「抹前景」时高亮前景
         final bool highlight = asBackground ? v > 127 : v <= 127;
         if (!highlight) continue;
-        path.addRect(Rect.fromLTWH(
-          target.left + x * cell,
-          target.top + y * cell,
-          cell,
-          cell,
-        ));
+        path.addRect(
+          Rect.fromLTWH(
+            target.left + x * cell,
+            target.top + y * cell,
+            cell,
+            cell,
+          ),
+        );
       }
     }
     canvas.drawPath(path, paint);

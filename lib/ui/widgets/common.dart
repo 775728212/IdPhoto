@@ -372,3 +372,158 @@ class InfoChip extends StatelessWidget {
     );
   }
 }
+
+/// 面板底部那一排「图标 + 文字」的方形工具按钮。
+class ToolButton extends StatelessWidget {
+  const ToolButton({
+    super.key,
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.active = false,
+    this.size = 46,
+  });
+
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final bool active;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color color = active ? AppColors.brand : AppColors.textSecondary;
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        behavior: HitTestBehavior.opaque,
+        child: Column(
+          children: <Widget>[
+            Container(
+              width: size,
+              height: size,
+              decoration: BoxDecoration(
+                color: active ? AppColors.brandSoft : AppColors.pageBg,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: active ? AppColors.brand : Colors.transparent,
+                ),
+              ),
+              child: Icon(icon, size: 21, color: color),
+            ),
+            const SizedBox(height: 5),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11.5,
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                color: color,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 带加减按钮的整数步进器。
+class StepperBox extends StatelessWidget {
+  const StepperBox({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+    this.unit = '',
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int max;
+  final ValueChanged<int> onChanged;
+  final String unit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: AppColors.pageBg,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: <Widget>[
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: AppColors.textSecondary,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$value$unit',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _MiniButton(
+            icon: Icons.remove_rounded,
+            enabled: value > min,
+            onTap: () => onChanged(value > min ? value - 1 : min),
+          ),
+          _MiniButton(
+            icon: Icons.add_rounded,
+            enabled: value < max,
+            onTap: () => onChanged(value < max ? value + 1 : max),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MiniButton extends StatelessWidget {
+  const _MiniButton({
+    required this.icon,
+    required this.enabled,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Container(
+        width: 26,
+        height: 26,
+        margin: const EdgeInsets.only(left: 6),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(7),
+        ),
+        child: Icon(
+          icon,
+          size: 16,
+          color: enabled ? AppColors.textPrimary : AppColors.textTertiary,
+        ),
+      ),
+    );
+  }
+}

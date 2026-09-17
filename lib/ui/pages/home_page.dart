@@ -1,17 +1,25 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../../core/constants/photo_specs.dart';
 import '../../core/theme/app_theme.dart';
-import '../../core/utils/pixel_buffer.dart';
-import '../../models/edit_session.dart';
+import '../../models/crop_session.dart';
+import '../../models/output_options.dart';
 import '../../services/image_loader.dart';
+import '../../services/photo_picker.dart';
 import '../widgets/common.dart';
-import '../widgets/spec_picker_sheet.dart';
-import 'crop_page.dart';
+import '../widgets/photo_source_sheet.dart';
+import 'tools/crop_editor_page.dart';
+import 'tools/output_page.dart';
+import 'tools/recolor_editor_page.dart';
+import 'tools/sheet_tool_page.dart';
+import 'tools/watermark_tool_page.dart';
 
+/// 工具箱首页。
+///
+/// 这里**不是**流程的第一步，而是五个互不相干的工具的入口：
+/// 裁剪大小 / 压缩大小 / 换底色 / 加水印 / 拼图。想只压体积就直接点压缩，
+/// 不会被迫先走一遍裁剪和换底。
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -20,90 +28,257 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final ImagePicker _picker = ImagePicker();
-  PhotoSpec _spec = PhotoSpecs.byId('one_inch');
   bool _busy = false;
   String _busyLabel = '正在读取照片';
 
-  Future<void> _pick(ImageSource source) async {
-    if (_busy) return;
-    try {
-      final XFile? file = await _picker.pickImage(
-        source: source,
-        // 相机直出一般 4000px+，这里先让系统侧做一次粗缩，减轻解码压力
-        maxWidth: 4000,
-        maxHeight: 4000,
-        imageQuality: 95,
-        requestFullMetadata: false,
-      );
-      if (file == null) return;
+  /// 默认规格。各工具里都可以再换。
+  static const String _defaultSpecId = 'one_inch';
 
-      setState(() {
-        _busy = true;
-        _busyLabel = '正在读取照片';
-      });
-
-      final Uint8List bytes = await file.readAsBytes();
-      setState(() => _busyLabel = '正在解析图像');
-      final PixelBuffer? buffer = await ImageLoader.decodeBytes(bytes);
-      if (!mounted) return;
-
-      if (buffer == null) {
-        setState(() => _busy = false);
-        _toast('无法解析这张图片，请换一张试试');
-        return;
-      }
-
-      final EditSession session = EditSession(
-        source: buffer,
-        sourceName: file.name,
-        spec: _spec,
-      );
-      setState(() => _busy = false);
-      if (!mounted) return;
-      await Navigator.of(context).push<void>(
-        MaterialPageRoute<void>(builder: (_) => CropPage(session: session)),
-      );
-    } catch (error) {
-      if (!mounted) return;
-      setState(() => _busy = false);
-      _toast('读取照片失败：$error');
-    }
-  }
+  // ------------------------------------------------ 公共动作
 
   void _toast(String message) {
+    if (!mounted) return;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _openSpecSheet() async {
-    final PhotoSpec? picked = await showSpecPicker(context, _spec);
-    if (picked != null) setState(() => _spec = picked);
+  Future<LoadedPhoto?> _pickSingle({required String title}) async {
+    final ImageSource? source =
+        await showPhotoSourceSheet(context, title: title);
+    if (source == null || !mounted) return null;
+
+    try {
+      setState(() {
+        _busy = true;
+        _busyLabel = '正在读取照片';
+      });
+      final LoadedPhoto? photo = await PhotoPicker.pickOne(source: source);
+      if (!mounted) return null;
+      setState(() => _busy = false);
+      return photo;
+    } catch (error) {
+      if (!mounted) return null;
+      setState(() => _busy = false);
+      _toast('$error');
+      return null;
+    }
   }
+
+  Future<PhotoBatch?> _pickMany({required String busyLabel}) async {
+    try {
+      setState(() {
+        _busy = true;
+        _busyLabel = busyLabel;
+      });
+      final PhotoBatch batch = await PhotoPicker.pickMany(limit: 12);
+      if (!mounted) return null;
+      setState(() => _busy = false);
+      if (batch.isEmpty) return null;
+      if (batch.skipped > 0) {
+        _toast('有 ${batch.skipped} 张图片无法解析，已跳过');
+      }
+      return batch;
+    } catch (error) {
+      if (!mounted) return null;
+      setState(() => _busy = false);
+      _toast('$error');
+      return null;
+    }
+  }
+
+  Future<void> _push(Widget page) async {
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(builder: (_) => page),
+    );
+  }
+
+  // ------------------------------------------------ 五个工具
+
+  /// 裁剪大小：选图 → 裁剪编辑器 → 导出。
+  Future<void> _openCrop() async {
+    final LoadedPhoto? photo = await _pickSingle(title: '选择要裁剪的照片');
+    if (photo == null || !mounted) return;
+
+    final CropSession session = CropSession(
+      source: photo.buffer,
+      sourceName: photo.name,
+      spec: PhotoSpecs.byId(_defaultSpecId),
+    );
+
+    final bool? done = await Navigator.of(context).push<bool>(
+      MaterialPageRoute<bool>(
+        builder: (_) => CropEditorPage(session: session),
+      ),
+    );
+    if (done != true || !mounted) return;
+
+    await _push(
+      OutputPage(
+        image: session.baseImage,
+        baseName: outputBaseName(photo.name, session.spec.name),
+        title: '导出裁剪结果',
+        dpi: session.dpi,
+        metaLabel: session.summaryLabel,
+        shareText: '${session.spec.name}证件照已制作完成',
+      ),
+    );
+  }
+
+  /// 压缩大小：不裁剪、不换底，直接进压体积 / 限尺寸。
+  Future<void> _openCompress() async {
+    final LoadedPhoto? photo = await _pickSingle(title: '选择要压缩的照片');
+    if (photo == null || !mounted) return;
+
+    final int w = photo.buffer.width;
+    final int h = photo.buffer.height;
+    await _push(
+      OutputPage(
+        image: photo.buffer,
+        baseName: outputBaseName(photo.name, '压缩'),
+        title: '压缩大小',
+        dpi: 300,
+        allowResize: true,
+        preferTargetSize: true,
+        metaLabel: '原图 $w×$h px',
+        shareText: '已压缩的照片',
+      ),
+    );
+  }
+
+  /// 换底色：默认直接用原图换底，需要时再进裁剪。
+  Future<void> _openRecolor() async {
+    final LoadedPhoto? photo = await _pickSingle(title: '选择要换底色的照片');
+    if (photo == null || !mounted) return;
+
+    await _push(
+      RecolorEditorPage(
+        session: CropSession(
+          source: photo.buffer,
+          sourceName: photo.name,
+          spec: PhotoSpecs.byId(_defaultSpecId),
+          cropEnabled: false,
+        ),
+      ),
+    );
+  }
+
+  /// 加水印：自定义文字 / 字号 / 排版。
+  Future<void> _openWatermark() async {
+    final LoadedPhoto? photo = await _pickSingle(title: '选择要加水印的照片');
+    if (photo == null || !mounted) return;
+
+    await _push(
+      WatermarkToolPage(
+        session: CropSession(
+          source: photo.buffer,
+          sourceName: photo.name,
+          spec: PhotoSpecs.byId(_defaultSpecId),
+          cropEnabled: false,
+        ),
+      ),
+    );
+  }
+
+  /// 拼图：先选玩法，再按玩法收照片。
+  Future<void> _openSheet() async {
+    final SheetMode? mode = await showModalBottomSheet<SheetMode>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => const _SheetModeSheet(),
+    );
+    if (mode == null || !mounted) return;
+
+    if (mode == SheetMode.repeatSingle) {
+      final LoadedPhoto? photo =
+          await _pickSingle(title: '选择要重复排版的照片');
+      if (photo == null || !mounted) return;
+      await _push(
+        SheetToolPage(photos: <LoadedPhoto>[photo], mode: mode),
+      );
+      return;
+    }
+
+    final PhotoBatch? batch =
+        await _pickMany(busyLabel: '正在读取照片（可一次多选）');
+    if (batch == null || !mounted) return;
+    if (batch.length < 2) {
+      _toast('多张拼版至少要选 2 张照片，也可以改用「一张照片印多份」');
+      return;
+    }
+    await _push(SheetToolPage(photos: batch.photos, mode: mode));
+  }
+
+  // ------------------------------------------------ 视图
 
   @override
   Widget build(BuildContext context) {
+    final List<_Tool> tools = <_Tool>[
+      _Tool(
+        icon: Icons.crop_rounded,
+        title: '裁剪大小',
+        desc: '按一寸 / 二寸 / 护照等标准规格裁到精确像素，也能直接输 px 自定义',
+        color: AppColors.brand,
+        onTap: _openCrop,
+      ),
+      _Tool(
+        icon: Icons.compress_rounded,
+        title: '压缩大小',
+        desc: '指定「不超过 50KB」自动二分压到体积以内，也可先限制最长边',
+        color: const Color(0xFF0EA5A5),
+        onTap: _openCompress,
+      ),
+      _Tool(
+        icon: Icons.auto_fix_high_rounded,
+        title: '换底色',
+        desc: '自动抠出人像换白底 / 蓝底 / 红底，边缘自动去色溢，裁剪可选',
+        color: const Color(0xFFF59E0B),
+        onTap: _openRecolor,
+      ),
+      _Tool(
+        icon: Icons.water_drop_rounded,
+        title: '加水印',
+        desc: '自定义水印文字、字号与排版：平铺斜排 / 居中 / 底部横条 / 右下角',
+        color: const Color(0xFF7C3AED),
+        onTap: _openWatermark,
+      ),
+      _Tool(
+        icon: Icons.grid_view_rounded,
+        title: '拼图排版',
+        desc: '一张照片印多份，或多张不同照片拼一张，带裁切线直接拿去冲印',
+        color: const Color(0xFFE11D63),
+        onTap: _openSheet,
+      ),
+    ];
+
     return Scaffold(
       body: Stack(
         children: <Widget>[
           SafeArea(
-            child: CustomScrollView(
-              slivers: <Widget>[
-                const SliverToBoxAdapter(child: _Header()),
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-                  sliver: SliverToBoxAdapter(child: _buildStartCard()),
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 28),
+              children: <Widget>[
+                const _Header(),
+                LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints c) {
+                    final double cardWidth = (c.maxWidth - 12) / 2;
+                    return Wrap(
+                      spacing: 12,
+                      runSpacing: 12,
+                      children: tools
+                          .map(
+                            (_Tool t) => SizedBox(
+                              width: cardWidth,
+                              child: _ToolCard(tool: t),
+                            ),
+                          )
+                          .toList(),
+                    );
+                  },
                 ),
-                SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
-                  sliver: SliverToBoxAdapter(child: _buildSpecCard()),
-                ),
-                const SliverPadding(
-                  padding: EdgeInsets.fromLTRB(16, 14, 16, 0),
-                  sliver: SliverToBoxAdapter(child: _FeatureList()),
-                ),
-                const SliverToBoxAdapter(child: SizedBox(height: 28)),
+                const SizedBox(height: 18),
+                const _FooterNote(),
               ],
             ),
           ),
@@ -112,156 +287,24 @@ class _HomePageState extends State<HomePage> {
       ),
     );
   }
+}
 
-  Widget _buildStartCard() {
-    return SectionCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Expanded(
-                child: _BigAction(
-                  icon: Icons.photo_library_rounded,
-                  title: '从相册选择',
-                  subtitle: '已有的正面照',
-                  onTap: () => _pick(ImageSource.gallery),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: _BigAction(
-                  icon: Icons.photo_camera_rounded,
-                  title: '立即拍照',
-                  subtitle: '找面白墙更好',
-                  onTap: () => _pick(ImageSource.camera),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(
-              color: AppColors.brandSoft,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: const Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Icon(Icons.tips_and_updates_rounded,
-                    size: 16, color: AppColors.brand),
-                SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    '正面免冠、光线均匀、背景干净的照片，换底色效果最好。',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      height: 1.5,
-                      color: AppColors.brandDark,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+// ------------------------------------------------ 子组件
 
-  Widget _buildSpecCard() {
-    final List<PhotoSpec> quick = PhotoSpecs.common;
-    return SectionCard(
-      title: '选择规格',
-      trailing: TextButton(
-        onPressed: _openSpecSheet,
-        style: TextButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          minimumSize: Size.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        ),
-        child: const Text('全部规格  >', style: TextStyle(fontSize: 12.5)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: quick.map((PhotoSpec s) {
-              final bool active = s.id == _spec.id;
-              return GestureDetector(
-                onTap: () => setState(() => _spec = s),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 150),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: active ? AppColors.brand : AppColors.pageBg,
-                    borderRadius: BorderRadius.circular(9),
-                    border: Border.all(
-                      color: active ? AppColors.brand : Colors.transparent,
-                    ),
-                  ),
-                  child: Text(
-                    s.name,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                      color: active ? Colors.white : AppColors.textSecondary,
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-          const SizedBox(height: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-            decoration: BoxDecoration(
-              color: AppColors.pageBg,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              children: <Widget>[
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        '${_spec.name} · ${_spec.mmLabel}',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary,
-                        ),
-                      ),
-                      const SizedBox(height: 3),
-                      Text(
-                        _spec.note.isEmpty
-                            ? '输出 ${_spec.pxLabel(300)} @300DPI'
-                            : '${_spec.note} · 输出 ${_spec.pxLabel(_spec.dpi)}',
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          color: AppColors.textTertiary,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                InfoChip(
-                  icon: Icons.straighten_rounded,
-                  text: '${_spec.pixelWidth(_spec.dpi)}×${_spec.pixelHeight(_spec.dpi)}',
-                  color: AppColors.brand,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+class _Tool {
+  const _Tool({
+    required this.icon,
+    required this.title,
+    required this.desc,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String desc;
+  final Color color;
+  final Future<void> Function() onTap;
 }
 
 class _Header extends StatelessWidget {
@@ -270,12 +313,12 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return const Padding(
-      padding: EdgeInsets.fromLTRB(20, 22, 20, 18),
+      padding: EdgeInsets.fromLTRB(4, 22, 4, 18),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           Text(
-            '证件照制作',
+            '证件照工具箱',
             style: TextStyle(
               fontSize: 26,
               fontWeight: FontWeight.w700,
@@ -285,7 +328,7 @@ class _Header extends StatelessWidget {
           ),
           SizedBox(height: 6),
           Text(
-            '标准规格裁剪 · 智能换底色 · 按体积压缩',
+            '五个独立功能，想用哪个点哪个，不必从头走一遍流程',
             style: TextStyle(fontSize: 13.5, color: AppColors.textSecondary),
           ),
         ],
@@ -294,51 +337,61 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _BigAction extends StatelessWidget {
-  const _BigAction({
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
+class _ToolCard extends StatelessWidget {
+  const _ToolCard({required this.tool});
 
-  final IconData icon;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
+  final _Tool tool;
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: onTap,
+      onTap: () => tool.onTap(),
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 12),
+        height: 142,
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: <Color>[AppColors.brand, AppColors.brandDark],
-          ),
-          borderRadius: BorderRadius.circular(14),
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(AppTheme.radius),
+          boxShadow: const <BoxShadow>[
+            BoxShadow(
+              color: Color(0x0A111827),
+              blurRadius: 14,
+              offset: Offset(0, 4),
+            ),
+          ],
         ),
         child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Icon(icon, size: 30, color: Colors.white),
-            const SizedBox(height: 10),
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: tool.color.withValues(alpha: 0.10),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(tool.icon, size: 21, color: tool.color),
+            ),
+            const SizedBox(height: 11),
             Text(
-              title,
+              tool.title,
               style: const TextStyle(
-                fontSize: 14.5,
-                fontWeight: FontWeight.w600,
-                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.w700,
+                color: AppColors.textPrimary,
               ),
             ),
-            const SizedBox(height: 2),
-            Text(
-              subtitle,
-              style: TextStyle(
-                fontSize: 11.5,
-                color: Colors.white.withValues(alpha: 0.82),
+            const SizedBox(height: 5),
+            Expanded(
+              child: Text(
+                tool.desc,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  height: 1.5,
+                  color: AppColors.textSecondary,
+                ),
               ),
             ),
           ],
@@ -348,35 +401,32 @@ class _BigAction extends StatelessWidget {
   }
 }
 
-class _FeatureList extends StatelessWidget {
-  const _FeatureList();
+class _FooterNote extends StatelessWidget {
+  const _FooterNote();
 
   @override
   Widget build(BuildContext context) {
-    return const SectionCard(
-      title: '能做什么',
-      child: Column(
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: AppColors.brandSoft,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          _FeatureRow(
-            icon: Icons.crop_rounded,
-            title: '标准尺寸裁剪',
-            desc: '一寸 / 二寸 / 护照 / 签证 / 各类考试报名，共 30+ 规格，按毫米换算精确像素',
-          ),
-          _FeatureRow(
-            icon: Icons.auto_fix_high_rounded,
-            title: '一键换底色',
-            desc: '自动识别背景并替换成白底、蓝底、红底或渐变色，边缘自动去色溢',
-          ),
-          _FeatureRow(
-            icon: Icons.compress_rounded,
-            title: '按体积压缩',
-            desc: '指定"不超过 50KB"，自动二分搜索出画质最好的压缩参数',
-          ),
-          _FeatureRow(
-            icon: Icons.grid_view_rounded,
-            title: '排版打印',
-            desc: '一张 6 寸相纸自动排下 8 张一寸照，带裁切线，拿去冲印即可',
-            last: true,
+          Icon(Icons.tips_and_updates_rounded, size: 16, color: AppColors.brand),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '所有处理都在本机完成，照片不会上传到任何服务器。'
+              '正面免冠、光线均匀、背景干净的照片，抠图换底效果最好。',
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.6,
+                color: AppColors.brandDark,
+              ),
+            ),
           ),
         ],
       ),
@@ -384,61 +434,139 @@ class _FeatureList extends StatelessWidget {
   }
 }
 
-class _FeatureRow extends StatelessWidget {
-  const _FeatureRow({
+/// 拼图玩法选择。
+class _SheetModeSheet extends StatelessWidget {
+  const _SheetModeSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: AppColors.pageBg,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Center(
+                child: Container(
+                  width: 38,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppColors.divider,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                '拼图排版',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                '选一种玩法',
+                style: TextStyle(fontSize: 12.5, color: AppColors.textTertiary),
+              ),
+              const SizedBox(height: 16),
+              _ModeTile(
+                icon: Icons.filter_none_rounded,
+                title: '一张照片印多份',
+                desc: '同一张证件照在一张相纸上重复排开，比如 6 寸排 8 张一寸照',
+                onTap: () =>
+                    Navigator.of(context).pop(SheetMode.repeatSingle),
+              ),
+              const SizedBox(height: 10),
+              _ModeTile(
+                icon: Icons.grid_view_rounded,
+                title: '多张照片拼一张',
+                desc: '一次选多张不同照片，每张各自裁剪，混排到同一张相纸上',
+                onTap: () => Navigator.of(context).pop(SheetMode.mixed),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ModeTile extends StatelessWidget {
+  const _ModeTile({
     required this.icon,
     required this.title,
     required this.desc,
-    this.last = false,
+    required this.onTap,
   });
 
   final IconData icon;
   final String title;
   final String desc;
-  final bool last;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(bottom: last ? 0 : 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: AppColors.brandSoft,
-              borderRadius: BorderRadius.circular(10),
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+        decoration: BoxDecoration(
+          color: AppColors.surface,
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 42,
+              height: 42,
+              decoration: BoxDecoration(
+                color: AppColors.brandSoft,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, size: 21, color: AppColors.brand),
             ),
-            child: Icon(icon, size: 18, color: AppColors.brand),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 13.5,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.textPrimary,
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    title,
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.textPrimary,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  desc,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    height: 1.55,
-                    color: AppColors.textSecondary,
+                  const SizedBox(height: 3),
+                  Text(
+                    desc,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      height: 1.5,
+                      color: AppColors.textTertiary,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-        ],
+            const Icon(
+              Icons.chevron_right_rounded,
+              size: 20,
+              color: AppColors.textTertiary,
+            ),
+          ],
+        ),
       ),
     );
   }
